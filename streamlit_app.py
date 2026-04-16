@@ -23,12 +23,11 @@ TIMEOUT_WARN = 4
 TICKER_INT   = 0.4
 
 UNICODE_FONTS = [
+    "Carlito-Regular.ttf",                                      # bundled trong repo
+    "/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf", # Streamlit Cloud Linux
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/opentype/unifont/unifont.otf",
     "C:/Windows/Fonts/Arial.ttf",
     "C:/Windows/Fonts/calibri.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/Library/Fonts/Arial.ttf",
 ]
 LANGUAGES = ["Tiếng Việt", "Tiếng Anh", "Tiếng Nhật", "Tiếng Trung", "Tiếng Pháp", "Tiếng Đức"]
 
@@ -81,10 +80,11 @@ def extract_line_groups(pdf_path, page_nums=None):
 def _get_bold_font_path(font_path):
     if not font_path: return None
     for regular, bold in [
-        ("Arial.ttf",      "Arialbd.ttf"),
-        ("calibri.ttf",    "calibrib.ttf"),
-        ("times.ttf",      "timesbd.ttf"),
-        ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+        ("Carlito-Regular.ttf",  "Carlito-Bold.ttf"),
+        ("Arial.ttf",            "Arialbd.ttf"),
+        ("calibri.ttf",          "calibrib.ttf"),
+        ("times.ttf",            "timesbd.ttf"),
+        ("DejaVuSans.ttf",       "DejaVuSans-Bold.ttf"),
     ]:
         candidate = font_path.replace(regular, bold)
         if os.path.isfile(candidate): return candidate
@@ -214,9 +214,14 @@ st.markdown("""
     h1, h2, h3 { color: #e2e8f0 !important; }
     p, li, span { color: #e2e8f0; }
 
-    div[data-testid="stFileUploader"] { border: 1.5px dashed #4a5080; border-radius: 10px; padding: 8px; background: #1a1d27; }
-    div[data-testid="stFileUploader"] * { color: #e2e8f0 !important; }
+    div[data-testid="stFileUploader"] { border: 1.5px dashed #4a5080 !important; border-radius: 10px !important; padding: 8px !important; background: #1a1d27 !important; }
+    div[data-testid="stFileUploader"] label { color: #e2e8f0 !important; }
     div[data-testid="stFileUploader"] small { color: #94a3b8 !important; }
+    [data-testid="stFileUploaderDropzone"] { background-color: #242838 !important; border-color: #4a5080 !important; }
+    [data-testid="stFileUploaderDropzone"] > div { background-color: #242838 !important; }
+    [data-testid="stFileUploaderDropzone"] span { color: #e2e8f0 !important; }
+    [data-testid="stFileUploaderDropzone"] button { background-color: #2d3149 !important; color: #e2e8f0 !important; border-color: #4a5080 !important; }
+    [data-testid="stFileUploaderDropzone"] p { color: #94a3b8 !important; }
 
     label, .stSelectbox label, .stTextInput label,
     div[data-testid="stWidgetLabel"] p { color: #e2e8f0 !important; font-weight: 500; }
@@ -369,6 +374,7 @@ if run_btn and uploaded:
         progress.progress(92, text="Tạo PDF...")
         add_log("💾 Đang tạo PDF...")
         font_path = find_font()
+        add_log(f"🔤 Font: {os.path.basename(font_path) if font_path else 'built-in (không hỗ trợ tiếng Việt)'}")
         write_translated_pdf(src_path, dst_path, all_groups, all_trans, font_path)
 
         # 7. Tổng kết
