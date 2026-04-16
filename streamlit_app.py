@@ -3,6 +3,9 @@ PDF Translator — Gemini Flash 3  [Streamlit Web App]
 • Upload PDF → Dịch → Download PDF đã dịch
 • Dịch theo DÒNG: liền mạch, không khoảng cách nhân tạo
 • Thống kê token + chi phí USD/VND (×10)
+• Giữ nguyên UI sau khi tải file (session_state)
+• Hiển thị live timer trong lúc dịch
+• Rate-limit retry với exponential backoff
 """
 
 import os, time, json, tempfile
@@ -19,12 +22,14 @@ PRICE_INPUT  = 0.10   # USD per 1M input tokens
 PRICE_OUTPUT = 0.40   # USD per 1M output tokens
 USD_TO_VND   = 25400
 DELAY_SEC    = 0.3
-TIMEOUT_WARN = 4
-TICKER_INT   = 0.4
+
+# Rate limit retry settings
+MAX_RETRIES  = 5
+RETRY_CODES  = ("429", "resource_exhausted", "quota", "rate")
 
 UNICODE_FONTS = [
-    "Carlito-Regular.ttf",                                      # bundled trong repo
-    "/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf", # Streamlit Cloud Linux
+    "Carlito-Regular.ttf",
+    "/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "C:/Windows/Fonts/Arial.ttf",
     "C:/Windows/Fonts/calibri.ttf",
@@ -33,7 +38,7 @@ LANGUAGES = ["Tiếng Việt", "Tiếng Anh", "Tiếng Nhật", "Tiếng Trung",
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BACKEND (giữ nguyên logic, không đổi)
+# BACKEND
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def find_font():
@@ -154,21 +159,39 @@ def _parse_json(raw):
         except: pass
     return None
 
-def call_gemini(client, contents, max_tokens=65536, temperature=0.1):
-    resp = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=contents,
-        config=gtypes.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-        ),
-    )
-    meta  = getattr(resp, "usage_metadata", None)
-    in_t  = getattr(meta, "prompt_token_count",     0) or 0
-    out_t = getattr(meta, "candidates_token_count", 0) or 0
-    return resp.text.strip(), in_t, out_t
+def call_gemini_with_retry(client, contents, add_log_fn, max_tokens=65536, temperature=0.1):
+    """Gọi Gemini API với retry khi bị rate limit (exponential backoff)."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=contents,
+                config=gtypes.GenerateContentConfig(
+                    max_output_tokens=max_tokens,
+                    temperature=temperature,
+                ),
+            )
+            meta  = getattr(resp, "usage_metadata", None)
+            in_t  = getattr(meta, "prompt_token_count",     0) or 0
+            out_t = getattr(meta, "candidates_token_count", 0) or 0
+            return resp.text.strip(), in_t, out_t
 
-def translate_page(client, groups, target_lang, page_idx):
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = any(code in err_str for code in RETRY_CODES)
+
+            if is_rate_limit and attempt < MAX_RETRIES - 1:
+                wait = (2 ** attempt) * 5  # 5s, 10s, 20s, 40s
+                add_log_fn(f"   ⚠️  Rate limit! Chờ {wait}s rồi thử lại (lần {attempt + 1}/{MAX_RETRIES})...")
+                # Đếm ngược khi chờ rate limit
+                for remaining in range(wait, 0, -1):
+                    add_log_fn(f"   ⏳ Tiếp tục sau {remaining}s...")
+                    time.sleep(1)
+                add_log_fn(f"   🔄 Thử lại...")
+            else:
+                raise
+
+def translate_page(client, groups, target_lang, page_idx, add_log_fn):
     numbered = "\n".join(f"[{i}] {g['text']}" for i, g in enumerate(groups))
     prompt = (
         f"Dịch sang {target_lang}. Giữ nguyên số thứ tự [0]...[{len(groups) - 1}].\n"
@@ -177,7 +200,7 @@ def translate_page(client, groups, target_lang, page_idx):
         f"Chỉ JSON, không giải thích.\n\n"
         f"{numbered}"
     )
-    raw, in_t, out_t = call_gemini(client, prompt)
+    raw, in_t, out_t = call_gemini_with_retry(client, prompt, add_log_fn)
     parsed = _parse_json(raw)
     if isinstance(parsed, dict):
         return [str(parsed.get(str(i), groups[i]["text"])) for i in range(len(groups))], in_t, out_t
@@ -234,6 +257,12 @@ st.markdown("""
     .stat-val { font-size: 1.4rem; font-weight: bold; color: #e2e8f0; }
     .stat-lbl { font-size: 0.78rem; color: #94a3b8; margin-top: 4px; }
 
+    .timer-box { background: #1a1d27; border-radius: 10px; padding: 10px 18px; text-align: center; border: 1px solid #6c63ff; margin-bottom: 8px; }
+    .timer-val { font-size: 1.6rem; font-weight: bold; color: #a78bfa; font-family: 'Courier New', monospace; }
+    .timer-lbl { font-size: 0.78rem; color: #94a3b8; margin-top: 2px; }
+    .timer-status { font-size: 0.82rem; color: #6c63ff; margin-top: 4px; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
     .log-box { background: #1a1d27; border-radius: 8px; padding: 14px 18px; font-family: 'Courier New', monospace; font-size: 0.83rem; max-height: 340px; overflow-y: auto; border: 1px solid #4a5080; white-space: pre-wrap; color: #c4cde0; line-height: 1.6; }
 
     .stButton > button { background-color: #6c63ff !important; color: white !important; border: none !important; border-radius: 8px !important; padding: 10px 28px !important; font-weight: bold !important; font-size: 1rem !important; width: 100% !important; }
@@ -272,14 +301,33 @@ run_btn = st.button("▶  Bắt đầu dịch", disabled=(uploaded is None))
 
 # ── Khu vực kết quả ──────────────────────────────────────────────────────────
 if run_btn and uploaded:
+    # Xóa kết quả cũ khi bắt đầu dịch mới
+    st.session_state.pop("pdf_bytes", None)
+    st.session_state.pop("out_name", None)
+    st.session_state.pop("summary", None)
 
     # Stats placeholders
     st.markdown("### 📊 Tiến độ")
+
+    # Timer row
+    timer_ph = st.empty()
+
     col_pg, col_ln, col_usd, col_vnd = st.columns(4)
     ph_pages = col_pg.empty()
     ph_lines = col_ln.empty()
     ph_usd   = col_usd.empty()
     ph_vnd   = col_vnd.empty()
+
+    def render_timer(elapsed, current_page_start, status_msg):
+        page_elapsed = time.time() - current_page_start
+        timer_ph.markdown(
+            f"""<div class='timer-box'>
+                <div class='timer-val'>⏱ {elapsed:.0f}s</div>
+                <div class='timer-lbl'>Tổng thời gian đã chạy</div>
+                <div class='timer-status'>🔄 {status_msg} ({page_elapsed:.0f}s trang này)</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
     def render_stats(pages_done, total_pg, total_lines, tok_in, tok_out):
         usd = ((tok_in / 1e6) * PRICE_INPUT + (tok_out / 1e6) * PRICE_OUTPUT) * 10
@@ -304,10 +352,11 @@ if run_btn and uploaded:
         log_lines.append(f"[{ts}] {msg}")
         log_ph.markdown(
             f"<div class='log-box'>{'<br>'.join(log_lines[-40:])}</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
     # ── Chạy dịch ────────────────────────────────────────────────────────────
+    src_path = dst_path = None
     try:
         # 1. Lưu upload vào temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
@@ -348,7 +397,10 @@ if run_btn and uploaded:
 
         for idx, pi in enumerate(targets):
             groups = all_groups.get(pi, [])
-            add_log(f"📄 Trang {pi + 1}/{total_pg}: {len(groups)} dòng")
+            page_start_time = time.time()
+
+            add_log(f"📄 Trang {pi + 1}/{total_pg}: {len(groups)} dòng — đang gửi đến Gemini API...")
+            render_timer(time.time() - t0, page_start_time, f"Đang dịch trang {pi + 1}/{total_pg}")
 
             pct = int(10 + (idx / len(targets)) * 80)
             progress.progress(pct, text=f"Dịch trang {pi + 1}/{total_pg}...")
@@ -358,16 +410,18 @@ if run_btn and uploaded:
                 continue
 
             try:
-                trans, in_t, out_t = translate_page(client, groups, lang, pi)
+                trans, in_t, out_t = translate_page(client, groups, lang, pi, add_log)
                 tok_in  += in_t
                 tok_out += out_t
-                add_log(f"   ✅ {len(trans)} dòng ({in_t:,} in / {out_t:,} out tok)")
+                page_elapsed = time.time() - page_start_time
+                add_log(f"   ✅ {len(trans)} dòng ({in_t:,} in / {out_t:,} out tok) — {page_elapsed:.1f}s")
             except Exception as e:
                 add_log(f"   ❌ Lỗi dịch trang {pi + 1}: {e}")
                 trans = [g["text"] for g in groups]
 
             all_trans[pi] = trans
             render_stats(idx + 1, total_pg, total_lines, tok_in, tok_out)
+            render_timer(time.time() - t0, page_start_time, f"Hoàn thành trang {pi + 1}/{total_pg}")
             time.sleep(DELAY_SEC)
 
         # 6. Ghi PDF
@@ -384,36 +438,48 @@ if run_btn and uploaded:
         render_stats(len(targets), total_pg, total_lines, tok_in, tok_out)
         progress.progress(100, text="✅ Hoàn thành!")
 
+        # Ẩn timer khi xong, thay bằng thông báo hoàn thành
+        timer_ph.markdown(
+            f"""<div class='timer-box' style='border-color:#059669'>
+                <div class='timer-val' style='color:#10b981'>✅ {elapsed:.1f}s</div>
+                <div class='timer-lbl'>Tổng thời gian</div>
+                <div class='timer-status' style='color:#10b981;animation:none'>Dịch xong {len(targets)} trang!</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
         add_log("─" * 44)
         add_log(f"🎉 Xong {len(targets)} trang trong {elapsed:.1f}s")
         add_log(f"💰 Token: {tok_in:,} in + {tok_out:,} out")
         add_log(f"💵 Chi phí: ${usd:.4f} USD ≈ {vnd:,.0f} VND")
 
-        # 8. Download button
-        st.divider()
-        st.success(f"✅ Dịch xong {len(targets)} trang trong {elapsed:.1f}s  |  ${usd:.4f} USD ≈ {vnd:,.0f} VND")
-
+        # 8. Lưu vào session_state để giữ UI sau khi download
         with open(dst_path, "rb") as f:
-            pdf_bytes = f.read()
-
-        out_name = uploaded.name.replace(".pdf", f"_translated_{lang[:2]}.pdf")
-        st.download_button(
-            label="⬇️  Tải PDF đã dịch",
-            data=pdf_bytes,
-            file_name=out_name,
-            mime="application/pdf",
-            use_container_width=True,
-        )
+            st.session_state["pdf_bytes"] = f.read()
+        st.session_state["out_name"] = uploaded.name.replace(".pdf", f"_translated_{lang[:2]}.pdf")
+        st.session_state["summary"]  = f"✅ Dịch xong {len(targets)} trang trong {elapsed:.1f}s  |  ${usd:.4f} USD ≈ {vnd:,.0f} VND"
 
     except Exception as e:
         add_log(f"❌ Lỗi: {e}")
         st.error(f"❌ Có lỗi xảy ra: {e}")
 
     finally:
-        # Dọn temp files
         for p in [src_path, dst_path]:
-            try: os.unlink(p)
+            try:
+                if p: os.unlink(p)
             except: pass
+
+# ── Khu vực download (hiển thị bền vững qua session_state) ───────────────────
+if "pdf_bytes" in st.session_state:
+    st.divider()
+    st.success(st.session_state["summary"])
+    st.download_button(
+        label="⬇️  Tải PDF đã dịch",
+        data=st.session_state["pdf_bytes"],
+        file_name=st.session_state["out_name"],
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 elif not uploaded:
     st.info("👆 Vui lòng upload file PDF để bắt đầu")
