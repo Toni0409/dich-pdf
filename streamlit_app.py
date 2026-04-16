@@ -4,6 +4,7 @@ PDF Translator — Gemini Flash 3  [Streamlit Web App]
 • Timer chạy thật sự trong lúc chờ API (dùng threading)
 • Rate-limit retry với exponential backoff
 • Giữ nguyên UI sau khi tải file (session_state)
+• Password protection
 """
 
 import os, time, json, tempfile, threading
@@ -15,6 +16,7 @@ from datetime import datetime
 
 # ── Hằng số ───────────────────────────────────────────────────────────────────
 API_KEY      = st.secrets.get("GEMINI_API_KEY", "")
+APP_PASSWORD = st.secrets["APP_PASSWORD"]  # Bắt buộc set trong Streamlit secrets
 MODEL_NAME   = "gemini-3-flash-preview"
 PRICE_INPUT  = 0.10
 PRICE_OUTPUT = 0.40
@@ -31,6 +33,53 @@ UNICODE_FONTS = [
     "C:/Windows/Fonts/calibri.ttf",
 ]
 LANGUAGES = ["Tiếng Việt", "Tiếng Anh", "Tiếng Nhật", "Tiếng Trung", "Tiếng Pháp", "Tiếng Đức"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PASSWORD GATE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def check_password():
+    """Hiển thị màn hình đăng nhập. Trả về True nếu đúng password."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown("""
+    <style>
+        .login-box {
+            background: #1a1d27;
+            border: 1px solid #4a5080;
+            border-radius: 14px;
+            padding: 2.5rem 2rem;
+            max-width: 380px;
+            margin: 4rem auto 0 auto;
+            text-align: center;
+        }
+        .login-title { font-size: 1.6rem; font-weight: bold; color: #e2e8f0; margin-bottom: 0.3rem; }
+        .login-sub   { font-size: 0.85rem; color: #64748b; margin-bottom: 1.8rem; }
+    </style>
+    <div class='login-box'>
+        <div class='login-title'>⬡ Dịch PDF</div>
+        <div class='login-sub'>Powered by Gemini Flash — Vi Nguyen</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Dùng container để căn giữa input
+    col_l, col_m, col_r = st.columns([1, 2, 1])
+    with col_m:
+        st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
+        pwd = st.text_input("🔑 Nhập mật khẩu", type="password", key="pwd_input",
+                            placeholder="Password...")
+        login_btn = st.button("Đăng nhập", use_container_width=True)
+
+        if login_btn:
+            if pwd == APP_PASSWORD:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("❌ Sai mật khẩu, thử lại!")
+
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,11 +223,6 @@ def _gemini_thread_worker(client, contents, result_holder, max_tokens=65536, tem
         result_holder["error"] = e
 
 def call_gemini_live(client, contents, timer_ph, t0, page_start, label, log_lines, log_ph):
-    """
-    Gọi Gemini trong background thread.
-    Trong lúc chờ → cập nhật timer mỗi giây → người dùng thấy đồng hồ chạy.
-    Retry tự động khi gặp rate limit (exponential backoff).
-    """
     for attempt in range(MAX_RETRIES):
         result_holder = {}
         t = threading.Thread(
@@ -188,7 +232,6 @@ def call_gemini_live(client, contents, timer_ph, t0, page_start, label, log_line
         )
         t.start()
 
-        # Vòng lặp cập nhật timer mỗi giây trong khi thread đang chạy
         dot = 0
         while t.is_alive():
             elapsed      = time.time() - t0
@@ -205,7 +248,6 @@ def call_gemini_live(client, contents, timer_ph, t0, page_start, label, log_line
             dot += 1
             time.sleep(1)
 
-        # Thread xong — kiểm tra kết quả
         if "result" in result_holder:
             return result_holder["result"]
 
@@ -214,14 +256,13 @@ def call_gemini_live(client, contents, timer_ph, t0, page_start, label, log_line
         is_rate = any(c in err_str for c in RETRY_CODES)
 
         if is_rate and attempt < MAX_RETRIES - 1:
-            wait = (2 ** attempt) * 5  # 5 → 10 → 20 → 40s
+            wait = (2 ** attempt) * 5
             ts = datetime.now().strftime("%H:%M:%S")
             log_lines.append(f"[{ts}] ⚠️  Rate limit! Chờ {wait}s rồi thử lại ({attempt+1}/{MAX_RETRIES})...")
             log_ph.markdown(
                 f"<div class='log-box'>{'<br>'.join(log_lines[-40:])}</div>",
                 unsafe_allow_html=True,
             )
-            # Đếm ngược — timer đổi màu vàng
             for remaining in range(wait, 0, -1):
                 elapsed = time.time() - t0
                 timer_ph.markdown(
@@ -322,11 +363,29 @@ st.markdown("""
 
     hr { border-color: #2d3149 !important; }
     div[data-testid="stAlert"] { background: #1a1d27 !important; border-color: #4a5080 !important; color: #e2e8f0 !important; }
+
+    /* Login box */
+    .login-box { background: #1a1d27; border: 1px solid #4a5080; border-radius: 14px; padding: 2.5rem 2rem; max-width: 380px; margin: 4rem auto 0 auto; text-align: center; }
+    .login-title { font-size: 1.6rem; font-weight: bold; color: #e2e8f0; margin-bottom: 0.3rem; }
+    .login-sub   { font-size: 0.85rem; color: #64748b; margin-bottom: 1.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Kiểm tra password trước khi hiện app ─────────────────────────────────────
+if not check_password():
+    st.stop()
+
+# ── App chính (chỉ hiện sau khi đăng nhập) ───────────────────────────────────
 st.markdown("## ⬡ Dịch PDF sang PDF")
 st.markdown("<span style='color:#64748b;font-size:0.9rem'>Powered by Gemini Flash — Vi Nguyen</span>", unsafe_allow_html=True)
+
+# Nút đăng xuất nhỏ góc phải
+col_title, col_logout = st.columns([5, 1])
+with col_logout:
+    if st.button("🚪 Logout"):
+        st.session_state.pop("authenticated", None)
+        st.rerun()
+
 st.divider()
 
 uploaded = st.file_uploader("📄 Chọn file PDF cần dịch", type=["pdf"])
@@ -347,7 +406,7 @@ if run_btn and uploaded:
         st.session_state.pop(k, None)
 
     st.markdown("### 📊 Tiến độ")
-    timer_ph = st.empty()  # Timer live — cập nhật mỗi giây
+    timer_ph = st.empty()
 
     col_pg, col_ln, col_usd, col_vnd = st.columns(4)
     ph_pages = col_pg.empty()
@@ -432,7 +491,6 @@ if run_btn and uploaded:
                 continue
 
             try:
-                # ← Timer tích mỗi giây trong lúc đợi API nhờ threading
                 trans, in_t, out_t = translate_page(
                     client, groups, lang, pi,
                     timer_ph, t0, page_start, log_lines, log_ph
@@ -448,7 +506,6 @@ if run_btn and uploaded:
             render_stats(idx + 1, total_pg, total_lines, tok_in, tok_out)
             time.sleep(DELAY_SEC)
 
-        # Ghi PDF
         progress.progress(92, text="Tạo PDF...")
         add_log("💾 Đang tạo PDF...")
         timer_ph.markdown(
@@ -506,7 +563,7 @@ if run_btn and uploaded:
                 if p: os.unlink(p)
             except: pass
 
-# ── Download — luôn hiện sau khi dịch xong, không bị reset ──────────────────
+# ── Download ─────────────────────────────────────────────────────────────────
 if "pdf_bytes" in st.session_state:
     st.divider()
     st.success(st.session_state["summary"])
