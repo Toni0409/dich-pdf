@@ -1,0 +1,168 @@
+{
+  "_meta": {
+    "generated_at": "2026-04-25T21:14:52.997668",
+    "description": "Phân tích cấu trúc PDF kỹ thuật thang máy/thang cuốn. Dùng để cải thiện translator — fix overlap sau khi dịch.",
+    "sections": {
+      "summary": "Thống kê tổng hợp",
+      "translation_config": "Config cho translator đọc trực tiếp",
+      "pages": "Metadata + blocks mỗi trang",
+      "lines": "Mỗi dòng text + quan hệ không gian"
+    }
+  },
+  "summary": {
+    "files_analyzed": [
+      "ES1 Owner Manual 2.pdf",
+      "ES1 Owner Manual.pdf",
+      "FI 977.pdf",
+      "J-59611117-07.pdf",
+      "maintenance card.pdf",
+      "Maintenance Guide.pdf",
+      "Repair Guide.pdf",
+      "SAIS Inspector’s guide.pdf"
+    ],
+    "total_pages": 1480,
+    "total_lines": 58798,
+    "total_blocks": 24469,
+    "spacing_stats": {
+      "avg": 20.1,
+      "min": 1.01,
+      "median": 9.57,
+      "p25": 5.01,
+      "safe_expand_text_pt": 7.98,
+      "safe_expand_drawing_pt": 0,
+      "safe_expand_pt": 7.98
+    },
+    "font_stats": {
+      "body_size": 10.0,
+      "common_sizes": [
+        5.0,
+        7.0,
+        7.8,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        14.0
+      ],
+      "heading_sizes": [
+        10.7,
+        11.0,
+        11.1,
+        11.3,
+        11.5,
+        12.0,
+        12.7,
+        13.2,
+        13.4,
+        13.5,
+        13.6,
+        13.8,
+        14.0,
+        15.9,
+        16.0,
+        16.3,
+        18.0
+      ],
+      "top_fonts": [
+        "ArialMT",
+        "Arial",
+        "Arial-BoldMT",
+        "Arial,Bold",
+        "CourierNewPSMT"
+      ]
+    },
+    "content_area": {
+      "typical_x_min": 29.48,
+      "typical_x_max": 565.48,
+      "typical_y_min": 23.11,
+      "typical_y_max": 824.12
+    },
+    "risk_stats": {
+      "HIGH": 4428,
+      "MEDIUM": 525,
+      "LOW": 53845,
+      "HIGH_pct": 7.5,
+      "MEDIUM_pct": 0.9
+    },
+    "role_stats": {
+      "BODY_TEXT": {
+        "count": 15846,
+        "pct": 26.9
+      },
+      "TECHNICAL_VALUE": {
+        "count": 13236,
+        "pct": 22.5
+      },
+      "LABEL_SMALL": {
+        "count": 12527,
+        "pct": 21.3
+      },
+      "TABLE_CELL": {
+        "count": 8380,
+        "pct": 14.3
+      },
+      "HEADER": {
+        "count": 3303,
+        "pct": 5.6
+      },
+      "FOOTER": {
+        "count": 3234,
+        "pct": 5.5
+      },
+      "HEADING_3": {
+        "count": 989,
+        "pct": 1.7
+      },
+      "TOC_ENTRY": {
+        "count": 902,
+        "pct": 1.5
+      },
+      "HEADING_2": {
+        "count": 255,
+        "pct": 0.4
+      },
+      "HEADING_1": {
+        "count": 126,
+        "pct": 0.2
+      }
+    }
+  },
+  "translation_config": {
+    "redact_padding": {
+      "top": 2,
+      "bottom": 3.2,
+      "left": 3,
+      "right": 4
+    },
+    "safe_expand_text_pt": 7.98,
+    "safe_expand_drawing_pt": 0,
+    "expand_ratio_of_gap": 0.8,
+    "min_fontsize_pt": 6.5,
+    "shrink_step_pt": 0.5,
+    "strategy_by_role": {
+      "HEADING_1": "shrink_font_first",
+      "HEADING_2": "shrink_font_first",
+      "HEADING_3": "shrink_font_first",
+      "BODY_TEXT": "expand_down_then_shrink",
+      "LABEL_SMALL": "expand_down_then_shrink",
+      "TABLE_CELL": "shrink_font_first",
+      "TECHNICAL_VALUE": "keep_original_if_possible",
+      "HEADER": "shrink_font_first",
+      "FOOTER": "shrink_font_first",
+      "TOC_ENTRY": "translate_title_only"
+    },
+    "expansion_ratio": {
+      "CJK": 1.9,
+      "LATIN": 1.1,
+      "OTHER": 1.15
+    },
+    "_notes": {
+      "safe_expand_text_pt": "p40 gap text-to-text thực tế — an toàn hơn p20 vì loại bỏ nhiễu drawing",
+      "safe_expand_drawing_pt": "Luôn = 0 — không expand bbox qua đường kẻ bảng hoặc hình ảnh",
+      "expand_down_then_shrink": "Mở rộng bbox dọc = available_expand_down trước, nếu không đủ thì shrink font",
+      "shrink_font_first": "Giảm fontsize từng 0.5pt trước khi mở rộng bbox",
+      "keep_original_if_possible": "Giữ nguyên nếu bản dịch ngắn hơn hoặc bằng gốc; chỉ shrink 1-2 bước nếu cần",
+      "translate_title_only": "Tách text tại vị trí '....': dịch phần trước, giữ nguyên dấu chấm và số trang"
+    }
+  }
+}
