@@ -45,8 +45,8 @@ def load_layout_config():
     Trả về translation_config dict, hoặc None nếu không có.
     """
     candidates = [
-        Path(__file__).parent / "pdf_analysis.json",
-        Path("pdf_analysis.json"),
+Path(__file__).parent / "pdf_analysis_slim.json",
+Path("pdf_analysis_slim.json"),
     ]
     for p in candidates:
         if p.exists():
