@@ -1,11 +1,13 @@
 """
-streamlit_app_v2.py — PDF Translator v2
-Fix chính so với v1:
-  • Nhận diện paragraph block: các dòng sát nhau (gap < line_height/2) → cùng block
-  • y1_insert_max của mỗi dòng = y1_max của block (không bị chặn bởi dòng kế trong block)
-  • Redact mở rộng xuống đến y1_insert_max → đủ chỗ cho text dịch dài hơn
-  • Strategy: BODY_TEXT/LABEL_SMALL expand xuống, HEADING/TABLE_CELL shrink font
-  • TOC_ENTRY: chỉ dịch phần tiêu đề, giữ dấu ... và số trang
+streamlit_app_v2.py — PDF Translator v2 (FIXED)
+
+Fix so với v2 gốc:
+  • enrich_groups(): thêm check "same-row neighbor" cho bảng multi-column
+    - Nếu 1 span có neighbor ở cùng y-band nhưng x-column khác → đây là TABLE ROW
+    - y1_insert_max bị giới hạn bởi y1 của row đó (không expand vượt hàng)
+    - Strategy tự động chuyển sang shrink_font_first thay vì expand_down_then_shrink
+  • Không còn tình trạng block "Schindler/GFQE/CH-6030" expand xuống và đẩy
+    "ngoại lệ:" vào vùng của cột khác
 """
 
 import os, re, time, json, tempfile, threading
@@ -102,9 +104,7 @@ def _h_overlap(a, b, tol=3):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ENRICH GROUPS
-# Key insight: dòng sát nhau (gap < line_height/2) = cùng paragraph block
-# → y1_insert_max của mỗi dòng trong block = y1_max của cả block
+# ENRICH GROUPS — FIXED
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_obstacles(page):
@@ -118,15 +118,49 @@ def _get_obstacles(page):
             obs.append([r.x0, r.y0, r.x1, r.y1, "drawing"])
     return obs
 
+
+def _has_same_row_neighbor(block, all_groups, y_tol=4):
+    """
+    Kiểm tra xem block có span nào CÙNG ROW (y gần nhau) nhưng KHÁC CỘT (x cách xa) không.
+    Nếu có → đây là bảng multi-column → không được expand y1 vượt qua row đó.
+
+    Trả về y1_row_limit nếu phát hiện table row, None nếu không.
+    """
+    block_x0 = min(g["bbox"][0] for g in block)
+    block_x1 = max(g["bbox"][2] for g in block)
+    block_y0 = min(g["bbox"][1] for g in block)
+    block_y1 = max(g["bbox"][3] for g in block)
+
+    for g in all_groups:
+        if any(g is b for b in block):
+            continue
+        gx0, gy0, gx1, gy1 = g["bbox"]
+
+        # Cùng row: y-band overlap với block
+        y_same_row = gy0 < block_y1 + y_tol and gy1 > block_y0 - y_tol
+
+        # Khác cột: KHÔNG overlap ngang (kể cả tol lớn)
+        x_different_col = not _h_overlap(
+            [block_x0, block_y0, block_x1, block_y1],
+            [gx0, gy0, gx1, gy1],
+            tol=15
+        )
+
+        if y_same_row and x_different_col:
+            # Phát hiện multi-column table row
+            # Giới hạn y1 = max(block_y1, y1 của tất cả neighbors cùng row)
+            return block_y1
+    return None
+
+
 def enrich_groups(groups, page):
     """
-    Tính y1_insert_max cho mỗi group — tức là y1 tối đa có thể insert text mà không đè lên element khác.
+    Tính y1_insert_max cho mỗi group.
 
-    Thuật toán:
-    1. Classify text_role cho mỗi group
-    2. Nhóm các group liền kề thành paragraph blocks (gap < line_height/2)
-    3. Tìm y1_max của block = y0 của element tiếp theo bên dưới block - 2pt
-    4. Gán y1_insert_max = block_y1_max cho tất cả dòng trong block
+    FIX: Thêm kiểm tra "same-row neighbor" để phát hiện bảng multi-column.
+    Nếu block nằm trong bảng (có neighbor cùng row, khác cột):
+      - y1_insert_max = y1 của block (không expand xuống)
+      - strategy → shrink_font_first
     """
     if not groups:
         return groups
@@ -143,9 +177,6 @@ def enrich_groups(groups, page):
     groups.sort(key=lambda g: (round(g["bbox"][1] / 3) * 3, g["bbox"][0]))
 
     # Bước 2: Nhóm thành paragraph blocks
-    # Block = các group liền kề có:
-    #   - gap < line_height * 0.6 (sát nhau)
-    #   - cùng x0 gần nhau (±20pt) → cùng cột
     blocks = []
     cur_block = [groups[0]]
 
@@ -157,7 +188,6 @@ def enrich_groups(groups, page):
         gap = cy0 - py1
         line_h = max(prev["bbox"][3] - prev["bbox"][1], 1)
 
-        # Cùng block nếu: gap nhỏ VÀ overlap ngang đáng kể
         same_block = (
             gap < line_h * 0.7 and
             _h_overlap(prev["bbox"], curr["bbox"], tol=20)
@@ -169,47 +199,56 @@ def enrich_groups(groups, page):
             cur_block = [curr]
     blocks.append(cur_block)
 
-    # Bước 3: Với mỗi block, tìm y1_max = y0 của element tiếp theo bên dưới
+    # Bước 3: Tính y1_insert_max cho mỗi block
     for block in blocks:
         block_x0 = min(g["bbox"][0] for g in block)
         block_x1 = max(g["bbox"][2] for g in block)
         block_y1 = max(g["bbox"][3] for g in block)
         block_bbox = [block_x0, block[0]["bbox"][1], block_x1, block_y1]
 
-        best_y  = ph - 10
-        nb_type = "page_end"
+        # ── FIX: Kiểm tra same-row neighbor (multi-column table) ──
+        row_limit = _has_same_row_neighbor(block, groups, y_tol=4)
+        is_table_row = row_limit is not None
 
-        # Tìm group ngoài block bên dưới có overlap ngang với block
-        for g in groups:
-            if any(g is b for b in block):
-                continue  # skip dòng trong cùng block
-            gy0 = g["bbox"][1]
-            if gy0 <= block_y1 + 1:
-                continue
-            if not _h_overlap(block_bbox, g["bbox"], tol=10):
-                continue
-            candidate = gy0 - 2
-            if candidate < best_y:
-                best_y  = candidate
-                nb_type = "text"
+        if is_table_row:
+            # Bảng: không expand, giữ nguyên y1 của block
+            block_y1_max = block_y1
+            nb_type = "table_row"
+        else:
+            # Không phải bảng: tìm neighbor bên dưới như cũ
+            best_y  = ph - 10
+            nb_type = "page_end"
 
-        # Tìm obstacle bên dưới
-        for obs in obstacles:
-            oy0 = obs[1]
-            if oy0 <= block_y1 + 1:
-                continue
-            if not _h_overlap(block_bbox, obs, tol=10):
-                continue
-            if oy0 - 2 < best_y:
-                best_y  = block_y1  # không expand qua drawing/image
-                nb_type = obs[4]
+            for g in groups:
+                if any(g is b for b in block):
+                    continue
+                gy0 = g["bbox"][1]
+                if gy0 <= block_y1 + 1:
+                    continue
+                if not _h_overlap(block_bbox, g["bbox"], tol=10):
+                    continue
+                candidate = gy0 - 2
+                if candidate < best_y:
+                    best_y  = candidate
+                    nb_type = "text"
 
-        block_y1_max = max(best_y, block_y1)
+            for obs in obstacles:
+                oy0 = obs[1]
+                if oy0 <= block_y1 + 1:
+                    continue
+                if not _h_overlap(block_bbox, obs, tol=10):
+                    continue
+                if oy0 - 2 < best_y:
+                    best_y  = block_y1
+                    nb_type = obs[4]
 
-        # Bước 4: Gán y1_insert_max = block_y1_max cho TẤT CẢ dòng trong block
+            block_y1_max = max(best_y, block_y1)
+
+        # Bước 4: Gán cho tất cả dòng trong block
         for g in block:
             g["y1_insert_max"] = block_y1_max
             g["neighbor_below"] = nb_type
+            g["is_table_row"] = is_table_row   # flag để dùng ở write_translated_pdf
 
     return groups
 
@@ -231,7 +270,7 @@ def _rebuild_toc(title, dots, num):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# INSERT LINE V2
+# INSERT LINE V2 — FIXED
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _insert_line_v2(page, font_path, font_bold_path, group, text):
@@ -241,11 +280,17 @@ def _insert_line_v2(page, font_path, font_bold_path, group, text):
     color     = group.get("rgb", (0, 0, 0))
     orig_size = group["size"]
     y1_max    = group.get("y1_insert_max", y1)
+    is_table  = group.get("is_table_row", False)
 
     pw     = page.rect.width
     min_fs = CFG["min_fontsize_pt"]
     step   = CFG["shrink_step_pt"]
-    strategy = CFG["strategy_by_role"].get(role, "expand_down_then_shrink")
+
+    # FIX: Nếu là table row → luôn dùng shrink_font_first
+    if is_table:
+        strategy = "shrink_font_first"
+    else:
+        strategy = CFG["strategy_by_role"].get(role, "expand_down_then_shrink")
 
     if font_path:
         fontfile = font_bold_path if bold and font_bold_path else font_path
@@ -265,7 +310,7 @@ def _insert_line_v2(page, font_path, font_bold_path, group, text):
             fontsize=sz, fontname=fontname, color=color, align=0,
         )
 
-    # Strategy A: shrink font trong bbox gốc
+    # Strategy A: shrink font trong bbox gốc (table cell / header / footer)
     if strategy == "shrink_font_first":
         sz = orig_size
         while sz >= min_fs:
@@ -277,14 +322,11 @@ def _insert_line_v2(page, font_path, font_bold_path, group, text):
 
     # Strategy B: expand xuống đến y1_max, rồi shrink nếu cần
     if strategy == "expand_down_then_shrink":
-        # Thử bbox gốc trước
         if try_box(y0, y1, orig_size) >= 0:
             return
-        # Expand xuống
         if y1_max > y1 + 1:
             if try_box(y0, y1_max, orig_size) >= 0:
                 return
-            # Shrink font trong expanded bbox
             sz = orig_size - step
             while sz >= min_fs:
                 if try_box(y0, y1_max, sz) >= 0:
@@ -292,7 +334,6 @@ def _insert_line_v2(page, font_path, font_bold_path, group, text):
                 sz -= step
             _truncate(page, fontname, x0, y0, x1_safe, y1_max, text, min_fs, color)
         else:
-            # Không expand được → shrink trong bbox gốc
             sz = orig_size - step
             while sz >= min_fs:
                 if try_box(y0, y1, sz) >= 0:
@@ -337,7 +378,7 @@ def _truncate(page, fontname, x0, y0, x1, y1, text, fontsize, color):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WRITE TRANSLATED PDF V2
+# WRITE TRANSLATED PDF V2 — FIXED
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def write_translated_pdf_v2(src, dst, all_groups, all_trans, font_path):
@@ -352,15 +393,18 @@ def write_translated_pdf_v2(src, dst, all_groups, all_trans, font_path):
 
         page = doc[pi]
 
-        # Enrich: tính text_role + y1_insert_max theo block logic
+        # Enrich: tính text_role + y1_insert_max + is_table_row
         enrich_groups(groups, page)
 
-        # Redact: xóa vùng text gốc, mở rộng xuống y1_insert_max nếu expand strategy
+        # Redact
         for g in groups:
             r        = fitz.Rect(g["bbox"])
             y1_max   = g.get("y1_insert_max", r.y1)
-            strategy = CFG["strategy_by_role"].get(g.get("text_role", "BODY_TEXT"), "expand_down_then_shrink")
+            is_table = g.get("is_table_row", False)
+            strategy = "shrink_font_first" if is_table else \
+                       CFG["strategy_by_role"].get(g.get("text_role", "BODY_TEXT"), "expand_down_then_shrink")
 
+            # FIX: Table cell → redact chỉ bbox gốc (không mở rộng xuống)
             if strategy == "expand_down_then_shrink":
                 redact_y1 = y1_max
             else:
@@ -404,7 +448,7 @@ def write_translated_pdf_v2(src, dst, all_groups, all_trans, font_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# UI
+# UI (giữ nguyên từ v2 gốc)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(page_title="Dịch PDF v2 — Vi Nguyen", page_icon="⬡", layout="centered")
@@ -450,7 +494,7 @@ st.markdown("""<style>
 if not check_password():
     st.stop()
 
-st.markdown("## ⬡ Dịch PDF sang PDF <span class='v2-badge'>v2</span>", unsafe_allow_html=True)
+st.markdown("## ⬡ Dịch PDF sang PDF <span class='v2-badge'>v2 fixed</span>", unsafe_allow_html=True)
 st.markdown("<span style='color:#64748b;font-size:0.9rem'>Powered by Gemini Flash — Vi Nguyen</span>", unsafe_allow_html=True)
 
 if _cfg_path:
@@ -541,7 +585,7 @@ if run_btn and uploaded:
             time.sleep(DELAY_SEC)
 
         progress.progress(92, text="Tạo PDF...")
-        add_log("💾 Đang tạo PDF (v2 block-aware)...")
+        add_log("💾 Đang tạo PDF (v2-fixed: table-aware)...")
         font_path = find_font()
         add_log(f"🔤 Font: {os.path.basename(font_path) if font_path else 'built-in'}")
         write_translated_pdf_v2(src_path, dst_path, all_groups, all_trans, font_path)
@@ -561,7 +605,7 @@ if run_btn and uploaded:
         add_log(f"🎉 {len(targets)} trang / {elapsed:.1f}s / ${usd:.4f} ≈ {vnd:,.0f}₫")
         with open(dst_path, "rb") as f:
             st.session_state["pdf_bytes"] = f.read()
-        st.session_state["out_name"] = uploaded.name.replace(".pdf", f"_v2_{lang[:2]}.pdf")
+        st.session_state["out_name"] = uploaded.name.replace(".pdf", f"_v2fixed_{lang[:2]}.pdf")
         st.session_state["summary"]  = f"✅ {len(targets)} trang — {elapsed:.1f}s — ${usd:.4f} ≈ {vnd:,.0f}₫"
 
     except Exception as e:
@@ -576,7 +620,7 @@ if run_btn and uploaded:
 if "pdf_bytes" in st.session_state:
     st.divider()
     st.success(st.session_state["summary"])
-    st.download_button("⬇️  Tải PDF đã dịch (v2)", data=st.session_state["pdf_bytes"],
+    st.download_button("⬇️  Tải PDF đã dịch (v2-fixed)", data=st.session_state["pdf_bytes"],
         file_name=st.session_state["out_name"], mime="application/pdf", use_container_width=True)
 elif not uploaded:
     st.info("👆 Vui lòng upload file PDF để bắt đầu")
