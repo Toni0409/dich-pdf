@@ -45,8 +45,8 @@ def load_layout_config():
     Trả về translation_config dict, hoặc None nếu không có.
     """
     candidates = [
-Path(__file__).parent / "pdf_analysis_slim.json",
-Path("pdf_analysis_slim.json"),
+        Path(__file__).parent / "pdf_analysis.json",
+        Path("pdf_analysis.json"),
     ]
     for p in candidates:
         if p.exists():
@@ -286,7 +286,6 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
     """
     x0, y0, x1, y1 = group["bbox"]
     role      = group.get("text_role", "BODY_TEXT")
-    avail_dwn = group.get("available_expand_down", 0.0)
     orig_size = group["size"]
     bold      = group.get("bold", False)
     color     = group.get("rgb", (0, 0, 0))
@@ -296,6 +295,17 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
     min_fs    = CFG["min_fontsize_pt"]
     step      = CFG["shrink_step_pt"]
     strategy  = CFG["strategy_by_role"].get(role, "expand_down_then_shrink")
+
+    # Tính y1_max: expand xuống đến sát dòng kế tiếp hoặc cuối trang
+    gap_to_next    = group.get("gap_to_next_pt", ph - y1)
+    neighbor_below = group.get("neighbor_below", "page_end")
+    if neighbor_below in ("drawing", "image"):
+        y1_max = y1                          # không expand qua drawing/image
+    elif neighbor_below == "text" and gap_to_next > 0:
+        y1_max = y1 + gap_to_next - 2.0     # 2pt buffer trước dòng kế
+    else:
+        y1_max = ph - 10                     # expand đến cuối trang
+    avail_dwn = max(y1_max - y1, 0)
 
     # Setup font
     if font_path:
@@ -331,7 +341,7 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
 
     # ── Strategy B: expand_down_then_shrink ───────────────────────────────────
     if strategy == "expand_down_then_shrink":
-        # Thử với bbox gốc trước
+        # Bước 1: thử bbox gốc
         rc = page.insert_textbox(
             fitz.Rect(x0, y0, x1_safe, y1),
             translated_text,
@@ -341,22 +351,21 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
         if rc >= 0:
             return
 
-        # Expand y1 xuống = available_expand_down (đã = 0 nếu drawing bên dưới)
-        if avail_dwn > 0:
-            y1_exp = min(y1 + avail_dwn, ph - 10)
+        # Bước 2: expand xuống đến y1_max (sát dòng kế tiếp hoặc cuối trang)
+        if avail_dwn > 1:
             rc = page.insert_textbox(
-                fitz.Rect(x0, y0, x1_safe, y1_exp),
+                fitz.Rect(x0, y0, x1_safe, y1_max),
                 translated_text,
                 fontsize=orig_size, fontname=fontname,
                 color=color, align=0,
             )
             if rc >= 0:
                 return
-            # Shrink font trong expanded bbox
+            # Bước 3: shrink font trong expanded bbox
             size = orig_size - step
             while size >= min_fs:
                 rc = page.insert_textbox(
-                    fitz.Rect(x0, y0, x1_safe, y1_exp),
+                    fitz.Rect(x0, y0, x1_safe, y1_max),
                     translated_text,
                     fontsize=size, fontname=fontname,
                     color=color, align=0,
@@ -365,7 +374,7 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
                     return
                 size -= step
         else:
-            # Không expand được → shrink font trong bbox gốc
+            # drawing/image bên dưới → chỉ shrink font trong bbox gốc
             size = orig_size - step
             while size >= min_fs:
                 rc = page.insert_textbox(
@@ -378,7 +387,7 @@ def _insert_line_v2(page, font_path, font_bold_path, group, translated_text):
                     return
                 size -= step
 
-        _insert_truncated(page, fontname, x0, y0, x1_safe, y1,
+        _insert_truncated(page, fontname, x0, y0, x1_safe, y1_max,
                           translated_text, min_fs, color)
         return
 
@@ -473,19 +482,29 @@ def write_translated_pdf_v2(src, dst, all_groups, all_trans, font_path):
         enrich_groups(groups, page)
 
         # ── Bước 1: Redact toàn bộ text gốc ─────────────────────────────────
+        ph_r = page.rect.height
         for g in groups:
-            r    = fitz.Rect(g["bbox"])
-            avail = g.get("available_expand_down", 0.0)
+            r              = fitz.Rect(g["bbox"])
+            gap_to_next    = g.get("gap_to_next_pt", ph_r - r.y1)
+            neighbor_below = g.get("neighbor_below", "page_end")
+            role_r         = g.get("text_role", "BODY_TEXT")
+            strategy_r     = CFG["strategy_by_role"].get(role_r, "expand_down_then_shrink")
 
-            # Expand redact xuống đúng khoảng cần thiết
-            # Nếu neighbor là drawing/image → không expand xuống (avail=0)
-            expand_bottom = min(avail, CFG["safe_expand_text_pt"])
+            if strategy_r == "expand_down_then_shrink":
+                if neighbor_below in ("drawing", "image"):
+                    expand_bottom = pad["bottom"]
+                elif neighbor_below == "text" and gap_to_next > 0:
+                    expand_bottom = gap_to_next - 2.0
+                else:
+                    expand_bottom = ph_r - r.y1 - 10
+            else:
+                expand_bottom = pad["bottom"]
 
             redact_rect = fitz.Rect(
                 r.x0 - pad["left"],
                 r.y0 - pad["top"],
                 r.x1 + pad["right"],
-                r.y1 + pad["bottom"] + expand_bottom,
+                r.y1 + max(expand_bottom, pad["bottom"]),
             )
             page.add_redact_annot(redact_rect.intersect(page.rect))
 
